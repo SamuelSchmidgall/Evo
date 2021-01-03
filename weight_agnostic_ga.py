@@ -5,6 +5,9 @@ from copy import deepcopy
 
 MAX_SEED = 2**16 - 1
 
+def softmax(x):
+    e_x = np.exp(x - np.max(x))
+    return e_x / e_x.sum()
 
 def sigmoid(x):
     return (np.tanh(x/2.0) + 1.0)/2.0
@@ -51,6 +54,8 @@ class WANN:
 
     def forward(self, x, weight_value):
         self.layers[0] = x.squeeze()
+        for _k in range(len(self.layers)):
+            self.layers[_k] *= 0
         for layer in range(1, len(self.layers)):
             for node in self.graph["layer"][layer]:
                 g_node = self.graph["nodes"][node]
@@ -81,7 +86,7 @@ def compute_returns(seed, graph):
     """
     avg_stand = 0
     returns = list()
-    max_env_interacts = 500
+    max_env_interacts = 200
     total_env_interacts = 0
     local_env = gym.make("CartPoleSwingup-v1")
 
@@ -165,15 +170,15 @@ Todo:
 
 
 class GAOptimizer:
-    def __init__(self, num_workers=1, epsilon_samples=48, weight_decay=0.01, max_iterations=2000):
+    def __init__(self, num_workers=1, epsilon_samples=48, max_iterations=2000):
         assert (epsilon_samples % num_workers == 0), "Epsilon sample size not divis num workers"
         self.num_workers = num_workers
-        self.weight_decay = weight_decay
         self.max_iterations = max_iterations
         self.epsilon_samples = epsilon_samples
 
-        self.elites = 8
-        self.elite_saves = 1
+        self.elites = 30
+        self.elite_saves = 5
+        self.tournament = False
 
         init_elite_graph = list()
         self.output_nodes = [999]
@@ -262,15 +267,27 @@ class GAOptimizer:
 
         net_rew = [(sample_returns[_k], net_seeds[_k], graph_list[_k]) for _k in range(len(net_seeds))]
         net_rew.sort(key=lambda x: x[0], reverse=True)
-        if iteration == 0:
-            self.elite_candidates = net_rew[:self.elites]
+
+        if not self.tournament:
+            if iteration == 0:
+                self.elite_candidates = net_rew[:self.elites]
+            else:
+                self.elite_candidates = net_rew[:self.elites-self.elite_saves]
         else:
-            self.elite_candidates = net_rew[:self.elites-self.elite_saves]
+            top_elites = net_rew[:int(len(net_rew)*0.2)]
+            net_rew = net_rew[:self.elites]
+            tournament_probs = np.array([_[0] for _ in net_rew])
+            tournament_probs = (tournament_probs-tournament_probs.mean())/\
+                (tournament_probs-tournament_probs.std()+0.000001)
+            tournament_probs = softmax(tournament_probs)
+            t_net = np.random.choice(list(range(len(net_rew))), p=tournament_probs, size=(8,))
+            self.elite_candidates = [net_rew[_] for _ in t_net]
 
         #self.elite_candidates = [_ for _ in self.elite_candidates if len(_[2]) > 0]
         self.elite_list = list(range(len(self.elite_candidates)))
 
         # todo: learn probabilities of each, higher prob of remove to encourage sparseness?
+        top_elites = list()
         random_operations_prob = [0.25, 0.5, 0.25]
         random_operations = ["addweight", "activation", "node",]
         for _elite in range(len(self.elite_candidates)):
@@ -340,12 +357,15 @@ class GAOptimizer:
             self.elite_candidates[_elite] = \
                 (self.elite_candidates[_elite][0], self.elite_candidates[_elite][1], _sub_elite)
 
-        if iteration != 0:
-            self.elite_candidates += self.previous_elites
+        if not self.tournament:
+            if iteration != 0:
+                self.elite_candidates += self.previous_elites
 
-        # todo: evaluate each elite over 30 ts and set new prev elite
-        self.previous_elites = sorted(
-            self.elite_candidates, key=lambda x: x[0], reverse=True)[:self.elite_saves]
+            # todo: evaluate each elite over 30 ts and set new prev elite
+            self.previous_elites = sorted(
+                self.elite_candidates, key=lambda x: x[0], reverse=True)[:self.elite_saves]
+        else:
+            self.elite_candidates += top_elites
 
         avg_return_rec = sum(sample_returns) / len(sample_returns)
         return avg_return_rec, total_timesteps, num_corr_tot, max([_[0] for _ in self.elite_candidates])
@@ -362,14 +382,13 @@ if __name__ == "__main__":
     t_time = 0.0
 
     workers = 8
-    max_itr = 3000
+    max_itr = 2000
 
     eps_samples = 200
 
     n_type = "linear"
 
     es_optim = GAOptimizer(
-        weight_decay        = 0.01,
         num_workers         = workers,
         max_iterations      = max_itr,
         epsilon_samples     = eps_samples,
@@ -385,6 +404,9 @@ if __name__ == "__main__":
 
         with open("save_{}_net_rew_{}.pkl".format(n_type, 0), "wb") as f:
             pickle.dump(reward_list, f)
+
+        with open("save_{}_net_{}.pkl".format(n_type, 0), "wb") as f:
+            pickle.dump(es_optim.elite_candidates, f)
 
         if r >= top_reward:
             print("New Best Performance!", round(r, 5), _i, round(t/eps_samples, 5), eps_samples, max_elite)
