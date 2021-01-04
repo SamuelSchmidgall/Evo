@@ -28,55 +28,56 @@ def gaussian2(x):
 def step(x):
     return 1.0*(x>0.0)
 
-ACTIVATIONS = {
+ACTIVATIONS = { # todo: only tanh
     "tanh":np.tanh,
     "id":identity,
-    "sin":lambda x: np.sin(np.pi*x) ,
-    "cos":lambda x: np.cos(np.pi*x),
-    "abs":np.abs,
-    "rel":relu,
-    "sig":sigmoid,
-    "guass": gaussian,
-    "step":step,
-    #"square":lambda x:x**2,
-    "inv":lambda x: -x,
-    "gauss2":gaussian2,
-    "clip":lambda x:np.clip(x, -1, 1)
+    #"sin":lambda x: np.sin(np.pi*x) ,
+    #"cos":lambda x: np.cos(np.pi*x),
+    #"abs":np.abs,
+    #"rel":relu,
+    #"sig":sigmoid,
+    #"guass": gaussian,
+    #"step":step,
+    ##"square":lambda x:x**2,
+    #"inv":lambda x: -x,
+    #"gauss2":gaussian2,
+    #"clip":lambda x:np.clip(x, -1, 1)
 }
 
 
 class WANN:
     def __init__(self, graph):
         self.graph = graph
-        self.layers = list()
-        for layer in range(self.graph["depth"]):
-            self.layers.append(np.zeros((self.graph["layer_len"][layer],)))
 
     def forward(self, x, weight_value):
-        self.layers[0] = x.squeeze()
-        for _k in range(len(self.layers)):
-            self.layers[_k] *= 0
-        for layer in range(1, len(self.layers)):
-            for node in self.graph["layer"][layer]:
-                g_node = self.graph["nodes"][node]
-                node_conns = g_node['incoming']
-                for conn in node_conns:
-                    g_conn = self.graph["nodes"][conn]
-                    self.layers[layer][g_node["pos"]] += \
-                        self.layers[g_conn["depth"]][g_conn["pos"]]*weight_value
-                self.layers[layer][g_node["pos"]] = ACTIVATIONS[
-                    g_node["activation"]](self.layers[layer][g_node["pos"]])
-        output = np.zeros((1,))
-        for node in self.graph["layer"][999]:
-            g_node = self.graph["nodes"][node]
-            node_conns = g_node['incoming']
-            for conn in node_conns:
-                g_conn = self.graph["nodes"][conn]
-                output += self.layers[g_conn["depth"]][g_conn["pos"]] * weight_value
-        return output
+        # fifo queue for DFS
+        x = x.squeeze()
+        prior_nodes = set()
+        for _inp in self.graph['input']:
+            self.graph['nodes'][_inp]['val'] += x[_inp]
+        queue = deepcopy(self.graph['input'])
+        while len(queue) > 0:
+            node = queue[0]
+            if len(self.graph['nodes'][node]['outgoing']) > 0:
+                w_val = ACTIVATIONS[self.graph['nodes'][node]['activation']](self.graph['nodes'][node]['val'])
+                # for self connections
+                self.graph['nodes'][node]['val'] = 0
+                for outgoing_node in self.graph['nodes'][node]['outgoing']:
+                    if outgoing_node not in prior_nodes:
+                        queue.append(outgoing_node)
+                    prior_nodes.add(outgoing_node)
+                    self.graph['nodes'][outgoing_node]['val'] += w_val*weight_value
+            #else:
+            #    self.graph['nodes'][node]['val'] = 0
+            queue.pop(0)
+        output = deepcopy([self.graph['nodes'][_]['val'] for _ in self.graph['output']])
+        for _outp in self.graph['output']:
+            self.graph['nodes'][_outp]['val'] = 0
+        return np.tanh(np.array(output))
 
     def reset(self):
-        pass
+        for node in self.graph['nodes']:
+            self.graph['nodes'][node]['val'] = 0
 
 
 def compute_returns(seed, graph):
@@ -96,7 +97,7 @@ def compute_returns(seed, graph):
     for _sample in range(len(graph)):
         return_avg = 0.0
         network = WANN(graph[_sample])
-        weight_samples = [np.random.uniform(-2, 2) for _ in range(w_samples)]  # [-2, -1, -0.5, 0.5, 1, 2]
+        weight_samples = [-2, -1, -0.5, 0.5, 1, 2]#[np.random.uniform(-2, 2) for _ in range(w_samples)]
         for _w_sample in weight_samples:
             for _roll in range(num_env_rollouts):
                 network.reset()
@@ -111,17 +112,17 @@ def compute_returns(seed, graph):
                     total_env_interacts += 1
                     if game_over:
                         break
-            rp = np.random.uniform(0, 1)
-            if rp < 0.2:
-                conns = list()
-                nodes = network.graph["nodes"]
-                _conns = [(nodes[_node]["incoming"], _node)
-                    for _node in nodes if nodes[_node]["incoming"] is not None]
-                for _conn in _conns:
-                    for _sub_conn in _conn[0]:
-                        conns.append((_sub_conn, _conn[1]))
-                num_conns = len(conns)
-                return_avg -= num_conns*0.1
+            #rp = np.random.uniform(0, 1)
+            #if rp < 0.2:
+            #   conns = list()
+            #   nodes = network.graph["nodes"]
+            #   _conns = [(nodes[_node]["incoming"], _node)
+            #       for _node in nodes if nodes[_node]["incoming"] is not None]
+            #   for _conn in _conns:
+            #       for _sub_conn in _conn[0]:
+            #           conns.append((_sub_conn, _conn[1]))
+            #   num_conns = len(conns)
+            #   return_avg -= num_conns*0.1
         returns.append(return_avg / (w_samples*num_env_rollouts))
     return np.array(returns), total_env_interacts / (w_samples*num_env_rollouts), 0
 
@@ -176,37 +177,35 @@ class GAOptimizer:
         self.max_iterations = max_iterations
         self.epsilon_samples = epsilon_samples
 
-        self.elites = 30
-        self.elite_saves = 5
+        self.elites = 80
+        self.elite_saves = 20
         self.tournament = False
+        #self.tournament_size = 16
 
         init_elite_graph = list()
         self.output_nodes = [999]
         self.input_nodes = [0, 1, 2, 3]
         for _ in range(self.elites):
+            input_nodes = np.random.choice(
+                self.input_nodes, replace=False, size=(np.random.randint(1, 4),))
+            random_perm = set(input_nodes)
             graph = {
-                "layer":{
-                    0: [0, 1, 2, 3],
-                    1: [4,],
-                    999: [5,],
-                },
+                "input":
+                    [0, 1, 2, 3],
+                "output": [4],
                 "nodes":{
-                    0: {"incoming": None, "depth": 0, "activation": "id", "pos": 0},
-                    1: {"incoming": None, "depth": 0, "activation": "id", "pos": 1},
-                    2: {"incoming": None, "depth": 0, "activation": "id", "pos": 2},
-                    3: {"incoming": None, "depth": 0, "activation": "id", "pos": 3},
-                    4: {"incoming": [3], "depth": 1, "activation": "id", "pos": 0},
-                    5: {"incoming": np.random.permutation(self.input_nodes).tolist(),
-                        "depth": 999, "activation": "id", "pos": 0},
+                    0: {"outgoing": {4} if 0 in random_perm else set(),
+                        "activation": "id","val": 0},
+                    1: {"outgoing": {4} if 1 in random_perm else set(),
+                        "activation": "id", "val": 0},
+                    2: {"outgoing": {4} if 2 in random_perm else set(),
+                        "activation": "id", "val": 0},
+                    3: {"outgoing": {4} if 3 in random_perm else set(),
+                        "activation": "id", "val": 0},
+                    4: {"outgoing": set(), "activation": "id", "val": 0},
 
                 },
-                "depth": 2,
-                "layer_len":{
-                    0: 4,
-                    1: 1,
-                    999: 1,
-                },
-                "next_node_id": 6,
+                "next_node_id": 5,
             }
             init_elite_graph.append(graph)
 
@@ -274,88 +273,61 @@ class GAOptimizer:
             else:
                 self.elite_candidates = net_rew[:self.elites-self.elite_saves]
         else:
-            top_elites = net_rew[:int(len(net_rew)*0.2)]
-            net_rew = net_rew[:self.elites]
-            tournament_probs = np.array([_[0] for _ in net_rew])
-            tournament_probs = (tournament_probs-tournament_probs.mean())/\
-                (tournament_probs-tournament_probs.std()+0.000001)
-            tournament_probs = softmax(tournament_probs)
-            t_net = np.random.choice(list(range(len(net_rew))), p=tournament_probs, size=(8,))
-            self.elite_candidates = [net_rew[_] for _ in t_net]
+            tournament_cand = list()
+            top_candidates = net_rew[:self.elites]
+            for _t in range(self.epsilon_samples - self.elites):
+                t_net = np.random.choice(list(range(len(net_rew))), size=(self.tournament_size,))
+                tournament = [net_rew[_] for _ in t_net]
+                tournament.sort(key=lambda x: x[0], reverse=True)
+                tournament_cand.append(
+                    tournament[np.random.choice(list(range(self.tournament_size)),
+                    p=softmax(np.array([self.tournament_size-_ for _ in range(self.tournament_size)])))])
+            self.elite_candidates = tournament_cand
 
-        #self.elite_candidates = [_ for _ in self.elite_candidates if len(_[2]) > 0]
         self.elite_list = list(range(len(self.elite_candidates)))
 
         # todo: learn probabilities of each, higher prob of remove to encourage sparseness?
-        top_elites = list()
-        random_operations_prob = [0.25, 0.5, 0.25]
-        random_operations = ["addweight", "activation", "node",]
+        random_operations_prob = [0.5, 0.5]
+        random_operations = ["addweight", "node",]
         for _elite in range(len(self.elite_candidates)):
             _sub_elite = deepcopy(self.elite_candidates[_elite][2])
             operation = np.random.choice(random_operations, p=random_operations_prob)
-            if operation == "activation":
-                node = np.random.choice(list(_sub_elite["nodes"].keys()))
-                _sub_elite["nodes"][node]["activation"]\
-                    = np.random.choice(list(ACTIVATIONS.keys()))
-            elif operation == "node":
-                for _try in range(10):
-                    conns = list()
-                    nodes = _sub_elite["nodes"]
-                    _conns = [(nodes[_node]["incoming"], _node)
-                        for _node in nodes if nodes[_node]["incoming"] is not None]
-                    for _conn in _conns:
-                        for _sub_conn in _conn[0]:
-                            conns.append((_sub_conn, _conn[1]))
-                    random_conn = conns[np.random.choice(list(range(len(conns))))]
-                    new_node_id = _sub_elite["next_node_id"]
-                    incoming_node, outgoing_node = random_conn
-                    new_node_layer = _sub_elite["nodes"][incoming_node]["depth"] + 1
-                    if _sub_elite["nodes"][incoming_node]["depth"] + 1 \
-                        == _sub_elite["nodes"][outgoing_node]["depth"]:
-                        _sub_elite["nodes"][outgoing_node]["depth"] += 1
-                        if _sub_elite["nodes"][outgoing_node]["depth"] not in _sub_elite["layer"]:
-                            _sub_elite["layer"][_sub_elite["nodes"][outgoing_node]["depth"]] = list()
-                            _sub_elite["layer_len"][_sub_elite["nodes"][outgoing_node]["depth"]] = 0
-                            _sub_elite["depth"] += 1
-                        _sub_elite["layer"][_sub_elite["nodes"][outgoing_node]["depth"]].append(outgoing_node)
-                        _sub_elite["layer"][_sub_elite["nodes"][outgoing_node]["depth"]-1].remove(outgoing_node)
-                        _sub_elite["layer_len"][_sub_elite["nodes"][outgoing_node]["depth"]] += 1
-                        _sub_elite["layer_len"][_sub_elite["nodes"][outgoing_node]["depth"]-1] -= 1
-                        _sub_elite["nodes"][outgoing_node]["pos"] = _sub_elite["layer_len"][
-                            _sub_elite["nodes"][outgoing_node]["depth"]] - 1
-                    if new_node_layer not in _sub_elite["layer"]:
-                        _sub_elite["layer"][new_node_layer] = list()
-                        _sub_elite["layer_len"][new_node_layer] = 0
-                        _sub_elite["depth"] += 1
-                    _sub_elite["nodes"][outgoing_node]["incoming"].remove(incoming_node)
-                    _sub_elite["nodes"][outgoing_node]["incoming"].append(new_node_id)
-                    new_node_position = _sub_elite["layer_len"][new_node_layer]
-                    _sub_elite["layer_len"][new_node_layer] += 1
-                    _sub_elite["nodes"][new_node_id] = {
-                        "depth": new_node_layer,
-                        "pos": new_node_position,
-                        "incoming": [incoming_node],
-                        "activation": np.random.choice(list(ACTIVATIONS.keys())),
-                    }
-                    _sub_elite["layer"][new_node_layer].append(new_node_id)
-                    _sub_elite["next_node_id"] += 1
-                    break
+            #if operation == "activation":
+            #    node = np.random.choice(list(_sub_elite["nodes"].keys()))
+            #    _sub_elite["nodes"][node]["activation"]\
+            #        = 'tanh'#np.random.choice(list(ACTIVATIONS.keys()))
+            if operation == "node":
+                nodes = _sub_elite["nodes"]
+                _conns = [(nodes[_node]["outgoing"], _node)
+                    for _node in nodes if len(nodes[_node]["outgoing"]) > 0]
+                _connections = list()
+                for _connection in _conns:
+                    for _node in _connection[0]:
+                        _connections.append((_connection[1], _node))
+                _conn = _connections[np.random.choice(list(range(len(_connections))))]
+                _outgoing, _receiving = _conn[0], _conn[1]
+                _new_node_id = _sub_elite["next_node_id"]
+                _sub_elite["next_node_id"] += 1
+                _sub_elite["nodes"][_new_node_id] = {
+                    "val": 0,
+                    "activation": "tanh",
+                    "outgoing": {_receiving},
+                }
+                _sub_elite["nodes"][_outgoing]["outgoing"].remove(_receiving)
+                _sub_elite["nodes"][_outgoing]["outgoing"].add(_new_node_id)
             elif operation == "addweight":
                 for _try in range(10):
                     node1 = np.random.choice(list(_sub_elite["nodes"].keys()))
                     node2 = np.random.choice(list(_sub_elite["nodes"].keys()))
-                    if node1 == node2: continue
-                    node1_d = (node1, _sub_elite["nodes"][node1])
-                    node2_d = (node2, _sub_elite["nodes"][node2])
-                    nodes = sorted([node1_d, node2_d], key=lambda x: x[1]["depth"])
-                    node1_d, node2_d = nodes[0], nodes[1]
-                    if node1_d[1]['depth'] >= node2_d[1]['depth'] or \
-                        _sub_elite["nodes"][node2]["incoming"] is None or\
-                        node1 in _sub_elite["nodes"][node2]["incoming"]: continue
-                    _sub_elite["nodes"][node2_d[0]]["incoming"].append(node1_d[0])
+                    if node2 in _sub_elite["input"] or \
+                        (node1 == node1 and node1 in _sub_elite["output"]): continue
+                    elif node2 not in _sub_elite["output"] and \
+                        len(_sub_elite["nodes"][node2]['outgoing']) == 0: continue
+                    _sub_elite["nodes"][node1]['outgoing'].add(node2)
                     break
+
             self.elite_candidates[_elite] = \
-                (self.elite_candidates[_elite][0], self.elite_candidates[_elite][1], _sub_elite)
+                    (self.elite_candidates[_elite][0], self.elite_candidates[_elite][1], _sub_elite)
 
         if not self.tournament:
             if iteration != 0:
@@ -364,8 +336,8 @@ class GAOptimizer:
             # todo: evaluate each elite over 30 ts and set new prev elite
             self.previous_elites = sorted(
                 self.elite_candidates, key=lambda x: x[0], reverse=True)[:self.elite_saves]
-        else:
-            self.elite_candidates += top_elites
+        elif self.tournament:
+            self.elite_candidates += top_candidates
 
         avg_return_rec = sum(sample_returns) / len(sample_returns)
         return avg_return_rec, total_timesteps, num_corr_tot, max([_[0] for _ in self.elite_candidates])
