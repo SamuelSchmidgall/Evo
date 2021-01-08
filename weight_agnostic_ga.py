@@ -31,17 +31,17 @@ def step(x):
 ACTIVATIONS = { # todo: only tanh
     "tanh":np.tanh,
     "id":identity,
-    #"sin":lambda x: np.sin(np.pi*x) ,
-    #"cos":lambda x: np.cos(np.pi*x),
+    "sin":lambda x: np.sin(np.pi*x) ,
+    "cos":lambda x: np.cos(np.pi*x),
     #"abs":np.abs,
     #"rel":relu,
-    #"sig":sigmoid,
+    "sig":sigmoid,
     #"guass": gaussian,
-    #"step":step,
-    ##"square":lambda x:x**2,
+    "step":step,
+    #"square":lambda x:x**2,
     #"inv":lambda x: -x,
     #"gauss2":gaussian2,
-    #"clip":lambda x:np.clip(x, -1, 1)
+    "clip":lambda x:np.clip(x, -1, 1)
 }
 
 
@@ -70,7 +70,7 @@ class WANN:
             #else:
             #    self.graph['nodes'][node]['val'] = 0
             queue.pop(0)
-        output = deepcopy([self.graph['nodes'][_]['val'] for _ in self.graph['output']])
+        output = deepcopy([ACTIVATIONS[self.graph['nodes'][_]['activation']](self.graph['nodes'][_]['val']) for _ in self.graph['output']])
         for _outp in self.graph['output']:
             self.graph['nodes'][_outp]['val'] = 0
         return np.tanh(np.array(output))
@@ -87,25 +87,25 @@ def compute_returns(seed, graph):
     """
     avg_stand = 0
     returns = list()
-    max_env_interacts = 200
+    max_env_interacts = 500
     total_env_interacts = 0
-    local_env = gym.make("CartPoleSwingup-v1")
+    local_env = gym.make("QuanserPendulumBalance-v0")
 
-    w_samples = 9
-    avg_action = 0.0
+    w_samples = 6
     num_env_rollouts = 3
     for _sample in range(len(graph)):
         return_avg = 0.0
         network = WANN(graph[_sample])
-        weight_samples = [-2, -1, -0.5, 0.5, 1, 2]#[np.random.uniform(-2, 2) for _ in range(w_samples)]
+        weight_samples = [-2, -1, -0.5, 0.5, 1, 2] #[np.random.uniform(-2, 2) for _ in range(w_samples)]
         for _w_sample in weight_samples:
             for _roll in range(num_env_rollouts):
                 network.reset()
                 state = local_env.reset()
                 for _inter in range(max_env_interacts):
                     state = state.reshape((1, state.size))
-                    action1 = network.forward(state, _w_sample)
-                    avg_action += action1
+                    # appending bias activity
+                    state = np.concatenate((state, np.ones((1, 1))), axis=1)
+                    action1 = network.forward(state, _w_sample).squeeze()
                     state, reward, game_over, _info = local_env.step(action1)
                     return_avg += reward
                     avg_stand += 1
@@ -114,15 +114,7 @@ def compute_returns(seed, graph):
                         break
             #rp = np.random.uniform(0, 1)
             #if rp < 0.2:
-            #   conns = list()
-            #   nodes = network.graph["nodes"]
-            #   _conns = [(nodes[_node]["incoming"], _node)
-            #       for _node in nodes if nodes[_node]["incoming"] is not None]
-            #   for _conn in _conns:
-            #       for _sub_conn in _conn[0]:
-            #           conns.append((_sub_conn, _conn[1]))
-            #   num_conns = len(conns)
-            #   return_avg -= num_conns*0.1
+            # todo: penalize connections
         returns.append(return_avg / (w_samples*num_env_rollouts))
     return np.array(returns), total_env_interacts / (w_samples*num_env_rollouts), 0
 
@@ -171,48 +163,73 @@ Todo:
 
 
 class GAOptimizer:
-    def __init__(self, num_workers=1, epsilon_samples=48, max_iterations=2000):
+    def __init__(self, input_dim, output_dim, num_workers=1, epsilon_samples=48, max_iterations=2000):
         assert (epsilon_samples % num_workers == 0), "Epsilon sample size not divis num workers"
+        self.input_dim = input_dim
+        self.output_dim = output_dim
         self.num_workers = num_workers
         self.max_iterations = max_iterations
         self.epsilon_samples = epsilon_samples
 
-        self.elites = 80
-        self.elite_saves = 20
-        self.tournament = False
-        #self.tournament_size = 16
+        self.optimization = "tournament"
+
+        if self.optimization == "elite_selection":
+            self.elites = 30
+            self.unchanged_elites = 10
+            self.total_elites = self.elites + self.unchanged_elites
+
+        elif self.optimization == "tournament":
+            self.tournament_size = 8
+            self.cull_population = int(epsilon_samples*0.25)
+            self.unchanged_elites = int(epsilon_samples*0.05)
+            self.population_size = epsilon_samples - self.unchanged_elites
+            self.total_elites = self.population_size + self.unchanged_elites
 
         init_elite_graph = list()
-        self.output_nodes = [999]
-        self.input_nodes = [0, 1, 2, 3]
-        for _ in range(self.elites):
+        self.input_nodes = list(range(self.input_dim))
+        self.output_nodes = [_ + self.input_dim for _ in range(self.output_dim)]
+        for _ in range(self.total_elites):
             input_nodes = np.random.choice(
-                self.input_nodes, replace=False, size=(np.random.randint(1, 4),))
+                self.input_nodes, replace=False, size=(np.random.randint(1, self.input_dim),))
             random_perm = set(input_nodes)
             graph = {
-                "input":
-                    [0, 1, 2, 3],
-                "output": [4],
+                "input": self.input_nodes,
+                "output": self.output_nodes,
                 "nodes":{
-                    0: {"outgoing": {4} if 0 in random_perm else set(),
-                        "activation": "id","val": 0},
-                    1: {"outgoing": {4} if 1 in random_perm else set(),
-                        "activation": "id", "val": 0},
-                    2: {"outgoing": {4} if 2 in random_perm else set(),
-                        "activation": "id", "val": 0},
-                    3: {"outgoing": {4} if 3 in random_perm else set(),
-                        "activation": "id", "val": 0},
-                    4: {"outgoing": set(), "activation": "id", "val": 0},
-
+                    _: {"outgoing":
+                        set(np.random.choice(
+                            self.output_nodes,
+                            replace=False,
+                            size=(1,))) if _ in random_perm else set(), #np.random.randint(1, self.output_dim)
+                        "activation": "id",
+                        "val": 0,
+                        }
+                    for _ in self.input_nodes
                 },
-                "next_node_id": 5,
+                "next_node_id": self.input_dim + self.output_dim,
             }
+            graph["nodes"].update({
+                    _:{"outgoing": set(),
+                       "activation": "tanh",
+                       "val": 0
+                       }
+                for _ in self.output_nodes
+                })
             init_elite_graph.append(graph)
 
-        self.previous_elites = [
-            (-1000, [0,], init_elite_graph[_]) for _ in range(self.elites)]
-        self.elite_candidates = self.previous_elites
-        self.elite_list = np.array(list(range(len(self.elite_candidates))))
+        if self.optimization == "elite_selection":
+            self.previous_elites = [
+                (-1000, [0, ], init_elite_graph[_+self.elites]) for _ in range(self.unchanged_elites)]
+            self.elite_candidates = [
+                (-1000, [0,], init_elite_graph[_]) for _ in range(self.elites)] + self.previous_elites
+        elif self.optimization == "tournament":
+            self.previous_elites = [
+                (-1000, [0, ], init_elite_graph[_+self.population_size]) for _ in range(self.unchanged_elites)]
+            self.elite_candidates = [
+                (-1000, [0,], init_elite_graph[_]) for _ in range(self.population_size)] + self.previous_elites
+
+        self.best = self.elite_candidates[-1]
+        self.elite_list = list(range(self.total_elites))
 
     def parallel_returns(self, x):
         """
@@ -235,7 +252,7 @@ class GAOptimizer:
         graph_list = list()
         timestep_list = list()
         sample_returns = list()
-        np.random.seed(iteration*13*7**2)
+        #np.random.seed(iteration*7**2)
 
         mutation_seeds = list()
         for _w in range(self.num_workers):
@@ -249,6 +266,7 @@ class GAOptimizer:
             mutation_seeds.append((_w, seed_samples, graph))
         with Pool(self.num_workers) as p:
             values = p.map(func=self.parallel_returns, iterable=mutation_seeds)
+
         # todo: we dont need pool if we return seed or net id
         num_corr_tot = 0
         total_timesteps = 0
@@ -267,100 +285,97 @@ class GAOptimizer:
         net_rew = [(sample_returns[_k], net_seeds[_k], graph_list[_k]) for _k in range(len(net_seeds))]
         net_rew.sort(key=lambda x: x[0], reverse=True)
 
-        if not self.tournament:
-            if iteration == 0:
-                self.elite_candidates = net_rew[:self.elites]
-            else:
-                self.elite_candidates = net_rew[:self.elites-self.elite_saves]
-        else:
-            tournament_cand = list()
-            top_candidates = net_rew[:self.elites]
-            for _t in range(self.epsilon_samples - self.elites):
-                t_net = np.random.choice(list(range(len(net_rew))), size=(self.tournament_size,))
-                tournament = [net_rew[_] for _ in t_net]
-                tournament.sort(key=lambda x: x[0], reverse=True)
-                tournament_cand.append(
-                    tournament[np.random.choice(list(range(self.tournament_size)),
-                    p=softmax(np.array([self.tournament_size-_ for _ in range(self.tournament_size)])))])
-            self.elite_candidates = tournament_cand
+        if net_rew[0][0] > self.best[0]:
+            self.best = net_rew[0]
 
-        self.elite_list = list(range(len(self.elite_candidates)))
+        self.previous_elites = net_rew[:self.unchanged_elites]
+        self.elite_list = list(range(self.total_elites))
+
+        if self.optimization == "elite_selection":
+            self.elite_candidates = net_rew[:self.elites]
+
+        elif self.optimization == "tournament":
+            self.elite_candidates = list()
+            net_rew = net_rew[:-self.cull_population]
+            len_net_rew = range(len(net_rew))
+            for _ in range(self.total_elites):
+                tournament = [net_rew[np.random.choice(len_net_rew)] for _ in range(self.tournament_size)]
+                tournament.sort(key=lambda x: x[0], reverse=True)
+                self.elite_candidates.append(tournament[0])
+            self.elite_list = list(range(self.total_elites))
 
         # todo: learn probabilities of each, higher prob of remove to encourage sparseness?
-        random_operations_prob = [0.5, 0.5]
-        random_operations = ["addweight", "node",]
+        random_operations_prob = [0.25, 0.35, 0.4]
+        random_operations = ["addweight", "node", "activation"]
         for _elite in range(len(self.elite_candidates)):
-            _sub_elite = deepcopy(self.elite_candidates[_elite][2])
-            operation = np.random.choice(random_operations, p=random_operations_prob)
-            #if operation == "activation":
-            #    node = np.random.choice(list(_sub_elite["nodes"].keys()))
-            #    _sub_elite["nodes"][node]["activation"]\
-            #        = 'tanh'#np.random.choice(list(ACTIVATIONS.keys()))
-            if operation == "node":
-                nodes = _sub_elite["nodes"]
-                _conns = [(nodes[_node]["outgoing"], _node)
-                    for _node in nodes if len(nodes[_node]["outgoing"]) > 0]
-                _connections = list()
-                for _connection in _conns:
-                    for _node in _connection[0]:
-                        _connections.append((_connection[1], _node))
-                _conn = _connections[np.random.choice(list(range(len(_connections))))]
-                _outgoing, _receiving = _conn[0], _conn[1]
-                _new_node_id = _sub_elite["next_node_id"]
-                _sub_elite["next_node_id"] += 1
-                _sub_elite["nodes"][_new_node_id] = {
-                    "val": 0,
-                    "activation": "tanh",
-                    "outgoing": {_receiving},
-                }
-                _sub_elite["nodes"][_outgoing]["outgoing"].remove(_receiving)
-                _sub_elite["nodes"][_outgoing]["outgoing"].add(_new_node_id)
-            elif operation == "addweight":
-                for _try in range(10):
-                    node1 = np.random.choice(list(_sub_elite["nodes"].keys()))
-                    node2 = np.random.choice(list(_sub_elite["nodes"].keys()))
-                    if node2 in _sub_elite["input"] or \
-                        (node1 == node1 and node1 in _sub_elite["output"]): continue
-                    elif node2 not in _sub_elite["output"] and \
-                        len(_sub_elite["nodes"][node2]['outgoing']) == 0: continue
-                    _sub_elite["nodes"][node1]['outgoing'].add(node2)
-                    break
+            num_modifications = np.random.randint(low=1, high=4)
+            for _mod in range(num_modifications):
+                _sub_elite = deepcopy(self.elite_candidates[_elite][2])
+                operation = np.random.choice(random_operations, p=random_operations_prob)
+                if operation == "activation":
+                    node = np.random.choice(list(_sub_elite["nodes"].keys()))
+                    _sub_elite["nodes"][node]["activation"]\
+                        = np.random.choice(list(ACTIVATIONS.keys()))
+                if operation == "node":
+                    nodes = _sub_elite["nodes"]
+                    _conns = [(nodes[_node]["outgoing"], _node)
+                        for _node in nodes if len(nodes[_node]["outgoing"]) > 0]
+                    _connections = list()
+                    for _connection in _conns:
+                        for _node in _connection[0]:
+                            _connections.append((_connection[1], _node))
+                    _conn = _connections[np.random.choice(list(range(len(_connections))))]
+                    _outgoing, _receiving = _conn[0], _conn[1]
+                    _new_node_id = _sub_elite["next_node_id"]
+                    _sub_elite["next_node_id"] += 1
+                    _sub_elite["nodes"][_new_node_id] = {
+                        "val": 0,
+                        "activation": np.random.choice(list(ACTIVATIONS.keys())),
+                        "outgoing": {_receiving},
+                    }
+                    _sub_elite["nodes"][_outgoing]["outgoing"].remove(_receiving)
+                    _sub_elite["nodes"][_outgoing]["outgoing"].add(_new_node_id)
+                elif operation == "addweight":
+                    for _try in range(10):
+                        node1 = np.random.choice(list(_sub_elite["nodes"].keys()))
+                        node2 = np.random.choice(list(_sub_elite["nodes"].keys()))
+                        if node2 in _sub_elite["input"] or \
+                            (node1 == node1 and node1 in _sub_elite["output"]): continue
+                        elif node2 not in _sub_elite["output"] and \
+                            len(_sub_elite["nodes"][node2]['outgoing']) == 0: continue
+                        _sub_elite["nodes"][node1]['outgoing'].add(node2)
+                        break
 
-            self.elite_candidates[_elite] = \
-                    (self.elite_candidates[_elite][0], self.elite_candidates[_elite][1], _sub_elite)
+                self.elite_candidates[_elite] = \
+                        (self.elite_candidates[_elite][0], self.elite_candidates[_elite][1], _sub_elite)
 
-        if not self.tournament:
-            if iteration != 0:
-                self.elite_candidates += self.previous_elites
-
-            # todo: evaluate each elite over 30 ts and set new prev elite
-            self.previous_elites = sorted(
-                self.elite_candidates, key=lambda x: x[0], reverse=True)[:self.elite_saves]
-        elif self.tournament:
-            self.elite_candidates += top_candidates
+        if self.optimization == "elite_selection" or self.optimization == "tournament":
+            self.elite_candidates += self.previous_elites
 
         avg_return_rec = sum(sample_returns) / len(sample_returns)
-        return avg_return_rec, total_timesteps, num_corr_tot, max([_[0] for _ in self.elite_candidates])
+        return avg_return_rec, total_timesteps, num_corr_tot, max([_[0] for _ in self.elite_candidates]), self.best[0]
 
 
 
 # todo: rebuild using node indices
 
 
-envrn = gym.make("CartPoleSwingup-v1")
+envrn = gym.make("QuanserPendulumBalance-v0")
 envrn.reset()
 
 if __name__ == "__main__":
     t_time = 0.0
 
-    workers = 8
+    workers = 4
     max_itr = 2000
 
-    eps_samples = 200
+    eps_samples = 64
 
     n_type = "linear"
 
     es_optim = GAOptimizer(
+        input_dim           = envrn.observation_space.shape[0],
+        output_dim          = envrn.action_space.shape[0],
         num_workers         = workers,
         max_iterations      = max_itr,
         epsilon_samples     = eps_samples,
@@ -370,7 +385,7 @@ if __name__ == "__main__":
     top_reward = -100000.0
     reward_list = list()
     for _i in range(es_optim.max_iterations):
-        r, t, pr, max_elite = es_optim.update(_i)
+        r, t, pr, max_elite, max_best = es_optim.update(_i)
         t_time += t
         reward_list.append((r, _i, t_time))
 
@@ -381,10 +396,10 @@ if __name__ == "__main__":
             pickle.dump(es_optim.elite_candidates, f)
 
         if r >= top_reward:
-            print("New Best Performance!", round(r, 5), _i, round(t/eps_samples, 5), eps_samples, max_elite)
+            print("New Best Performance!", round(r, 5), _i, round(t/eps_samples, 5), eps_samples, max_elite, max_best)
             top_reward = r
         else:
-            print(round(r, 5), _i, round(t/eps_samples, 5), eps_samples, max_elite)
+            print(round(r, 5), _i, round(t/eps_samples, 5), eps_samples, max_elite, max_best)
     print("~~~~~~~~~~~~~~~~~~~~")
 
 
